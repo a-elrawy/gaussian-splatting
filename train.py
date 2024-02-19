@@ -8,6 +8,8 @@
 #
 # For inquiries contact  george.drettakis@inria.fr
 #
+import matplotlib.pyplot as plt
+import numpy as np
 
 import os
 import torch
@@ -30,9 +32,11 @@ except ImportError:
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
     first_iter = 0
+
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
+
     gaussians.training_setup(opt)
     if checkpoint:
         (model_params, first_iter) = torch.load(checkpoint)
@@ -75,6 +79,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Pick a random Camera
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
+            
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
 
         # Render
@@ -95,6 +100,20 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         iter_end.record()
 
         with torch.no_grad():
+            if iteration % 10 == 0:
+                image_np = image.permute(1, 2, 0).detach().cpu().numpy()
+                gt_image_np = gt_image.permute(1, 2, 0).detach().cpu().numpy()  
+
+                fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+                axes[0].imshow((image_np * 255).astype(np.uint8))
+                axes[0].axis('off')  
+                axes[0].set_title('Predicted Image')  
+                axes[1].imshow((gt_image_np * 255).astype(np.uint8))
+                axes[1].axis('off') 
+                axes[1].set_title('GT Image') 
+    
+                plt.savefig(f'output/images/{iteration}.png')
+
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
             if iteration % 10 == 0:
