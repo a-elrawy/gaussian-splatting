@@ -20,6 +20,8 @@ import numpy as np
 import json
 from pathlib import Path
 from plyfile import PlyData, PlyElement
+import open3d as o3d
+
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
 
@@ -106,10 +108,15 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
 
 def fetchPly(path):
     plydata = PlyData.read(path)
+    # plydata=o3d.io.read_point_cloud(path)
     vertices = plydata['vertex']
     positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
-    colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
-    normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+    # colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
+    # normals = np.vstack([vertices['nx'], vertices['ny'], vertices['nz']]).T
+
+    colors = np.random.rand(positions.shape[0], 3)
+    normals = np.random.rand(positions.shape[0], 3)
+    normals /= np.linalg.norm(normals, axis=1)[:, np.newaxis]
     return BasicPointCloud(points=positions, colors=colors, normals=normals)
 
 def storePly(path, xyz, rgb):
@@ -154,7 +161,7 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
 
     nerf_normalization = getNerfppNorm(train_cam_infos)
 
-    ply_path = os.path.join(path, "sparse/0/points3D.ply")
+    ply_path = os.path.join(path, "mesh.ply")
     bin_path = os.path.join(path, "sparse/0/points3D.bin")
     txt_path = os.path.join(path, "sparse/0/points3D.txt")
     if not os.path.exists(ply_path):
@@ -164,10 +171,9 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
         except:
             xyz, rgb, _ = read_points3D_text(txt_path)
         storePly(ply_path, xyz, rgb)
-    try:
-        pcd = fetchPly(ply_path)
-    except:
-        pcd = None
+
+    pcd = fetchPly(ply_path)
+
 
     scene_info = SceneInfo(point_cloud=pcd,
                            train_cameras=train_cam_infos,
