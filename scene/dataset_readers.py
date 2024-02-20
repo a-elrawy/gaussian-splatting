@@ -20,7 +20,6 @@ import numpy as np
 import json
 from pathlib import Path
 from plyfile import PlyData, PlyElement
-import open3d as o3d
 
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
@@ -108,7 +107,6 @@ def readColmapCameras(cam_extrinsics, cam_intrinsics, images_folder):
 
 def fetchPly(path):
     plydata = PlyData.read(path)
-    # plydata=o3d.io.read_point_cloud(path)
     vertices = plydata['vertex']
     positions = np.vstack([vertices['x'], vertices['y'], vertices['z']]).T
     # colors = np.vstack([vertices['red'], vertices['green'], vertices['blue']]).T / 255.0
