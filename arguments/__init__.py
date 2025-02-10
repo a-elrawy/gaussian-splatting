@@ -56,6 +56,10 @@ class ModelParams(ParamGroup):
         self.train_test_exp = False
         self.data_device = "cuda"
         self.eval = False
+        # View subset parameters
+        self.num_views = None
+        self.sampling_type = "random"  
+        self.angular_coverage = None
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

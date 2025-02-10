@@ -13,7 +13,7 @@ import os
 import random
 import json
 from utils.system_utils import searchForMaxIteration
-from scene.dataset_readers import sceneLoadTypeCallbacks
+from scene.dataset_readers import sceneLoadTypeCallbacks, select_camera_subset
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
@@ -28,7 +28,23 @@ class Scene:
         """
         self.model_path = args.model_path
         self.loaded_iter = None
-        self.gaussians = gaussians
+        self.gaussians = gaussians         
+
+        # Add these parameters to ModelParams first
+        self.num_views = args.num_views  # N = {5,10,15,20,30,50}
+        self.sampling_type = args.sampling_type # 'random' or 'structured'
+        self.angular_coverage = args.angular_coverage # 60 or 180
+        
+        scene_info = sceneLoadTypeCallbacks[args.source_type](args)
+        
+        if args.num_views:
+            # Select subset of training cameras
+            scene_info.train_cameras = select_camera_subset(
+                scene_info.train_cameras,
+                args.num_views,
+                args.sampling_type,
+                args.angular_coverage
+            )
 
         if load_iteration:
             if load_iteration == -1:

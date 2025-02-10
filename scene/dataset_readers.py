@@ -309,6 +309,48 @@ def readNerfSyntheticInfo(path, white_background, depths, eval, extension=".png"
                            is_nerf_synthetic=True)
     return scene_info
 
+def select_camera_subset(cameras, num_views, sampling_type='random', angular_coverage=None):
+    """Select a subset of cameras based on sampling strategy
+    
+    Args:
+        cameras: List of camera objects
+        num_views: Number of views to select 
+        sampling_type: 'random' or 'structured'
+        angular_coverage: Angular coverage in degrees for structured sampling
+    """
+    
+    if sampling_type == 'random':
+        # Random sampling
+        indices = np.random.choice(len(cameras), num_views, replace=False)
+        return [cameras[i] for i in indices]
+        
+    elif sampling_type == 'structured':
+        # Structured sampling based on angular coverage
+        assert angular_coverage in [60, 180], "Angular coverage must be 60 or 180 degrees"
+        
+        # Calculate camera angles relative to scene center
+        angles = []
+        for cam in cameras:
+            position = cam.position
+            angle = np.arctan2(position[2], position[0]) * 180 / np.pi
+            angles.append(angle)
+            
+        angles = np.array(angles)
+        
+        # Select cameras to achieve desired angular coverage
+        angle_step = angular_coverage / (num_views-1)
+        target_angles = np.arange(0, angular_coverage+1, angle_step)
+        
+        selected_cams = []
+        for target in target_angles:
+            idx = np.argmin(np.abs(angles - target))
+            selected_cams.append(cameras[idx])
+            
+        return selected_cams
+    
+    else:
+        raise ValueError(f"Unknown sampling type: {sampling_type}")
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender" : readNerfSyntheticInfo
