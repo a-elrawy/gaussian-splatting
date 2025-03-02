@@ -8,13 +8,17 @@
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 module load cuda cudnn gcc python/3.10 opencv/4.10.0
 
-# Activate the environment
-source /home/elrawy/projects/def-emohamme/elrawy/RobustGS/gs-env/bin/activate
+# Create a virtual environment
+python3 -m venv /home/elrawy/scratch/gs_env
+source /home/elrawy/scratch/gs_env/bin/activate
+
+pip install --upgrade pip
+pip install pytorch torchvision torchaudio
 
 # Install the requirements
-cd /home/elrawy/projects/def-emohamme/elrawy/SparseGS/gaussian-splatting
-# pip install -q submodules/diff-gaussian-rasterization
-# pip install -q submodules/simple-knn
+cd /home/elrawy/scratch/work/gaussian-splatting
+pip install -q submodules/diff-gaussian-rasterization
+pip install -q submodules/simple-knn
 
 nvidia-smi
 
