@@ -8,8 +8,11 @@
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 module load cuda cudnn gcc python/3.10 opencv/4.10.0
 
-# Create a virtual environment
-python3 -m venv /home/elrawy/scratch/gs_env
+# Create a virtual environment if it does not exist
+if [ ! -d "/home/elrawy/scratch/gs_env" ]; then
+    python3 -m venv /home/elrawy/scratch/gs_env
+fi
+
 source /home/elrawy/scratch/gs_env/bin/activate
 
 pip install --upgrade pip
