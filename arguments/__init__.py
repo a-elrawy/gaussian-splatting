@@ -57,9 +57,10 @@ class ModelParams(ParamGroup):
         self.data_device = "cuda"
         self.eval = False
         # View subset parameters
-        self.num_views = None
+        self.num_views = 250
         self.sampling_type = "random"  
-        self.angular_coverage = None
+        self.angular_coverage = 60.0
+        self.range_type = "full"
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

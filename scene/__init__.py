@@ -34,18 +34,7 @@ class Scene:
         self.num_views = args.num_views  # N = {5,10,15,20,30,50}
         self.sampling_type = args.sampling_type # 'random' or 'structured'
         self.angular_coverage = args.angular_coverage # 60 or 180
-        
-        scene_info = sceneLoadTypeCallbacks[args.source_type](args)
-        
-        if args.num_views:
-            # Select subset of training cameras
-            scene_info.train_cameras = select_camera_subset(
-                scene_info.train_cameras,
-                args.num_views,
-                args.sampling_type,
-                args.angular_coverage
-            )
-
+                
         if load_iteration:
             if load_iteration == -1:
                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))
@@ -63,6 +52,17 @@ class Scene:
             scene_info = sceneLoadTypeCallbacks["Blender"](args.source_path, args.white_background, args.depths, args.eval)
         else:
             assert False, "Could not recognize scene type!"
+
+        if args.num_views:
+            # Select subset of training cameras
+            selected_cameras = select_camera_subset(
+                scene_info.train_cameras,
+                args.num_views,
+                args.sampling_type,
+                args.angular_coverage
+            )
+
+            scene_info = scene_info._replace(train_cameras=selected_cameras)
 
         if not self.loaded_iter:
             with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
