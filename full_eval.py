@@ -12,6 +12,16 @@
 import os
 from argparse import ArgumentParser
 import time
+from metrics import evaluate
+
+# logger
+# import wandb
+
+# wandb.login()
+# # Set up wandb
+# wandb.init(project="SparseGS")
+
+# Define the scenes
 
 mipnerf360_outdoor_scenes = ["bicycle", "flowers", "garden", "stump", "treehill"]
 mipnerf360_indoor_scenes = ["room", "counter", "kitchen", "bonsai"]
@@ -84,8 +94,10 @@ if not args.skip_training:
         os.system("python train.py -s " + source + " -m " + args.output_path + "/" + args.exp_name + "/" + scene + common_args)
     db_timing = (time.time() - start_time)/60.0
 
-with open(os.path.join(args.output_path + "/" + args.exp_name ,"timing.txt"), 'w') as file:
-    file.write(f"m360: {m360_timing} minutes \n tandt: {tandt_timing} minutes \n db: {db_timing} minutes\n")
+    # wandb.log({"m360_timing": m360_timing, "tandt_timing": tandt_timing, "db_timing": db_timing})
+
+    with open(os.path.join(args.output_path + "/" + args.exp_name ,"timing.txt"), 'w') as file:
+        file.write(f"m360: {m360_timing} minutes \n tandt: {tandt_timing} minutes \n db: {db_timing} minutes\n")
 
 if not args.skip_rendering:
     all_sources = []

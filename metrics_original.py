@@ -39,9 +39,11 @@ def evaluate(model_paths):
     per_view_dict = {}
     full_dict_polytopeonly = {}
     per_view_dict_polytopeonly = {}
+    print("")
 
     for scene_dir in model_paths:
         try:
+            print("Scene:", scene_dir)
             full_dict[scene_dir] = {}
             per_view_dict[scene_dir] = {}
             full_dict_polytopeonly[scene_dir] = {}
@@ -50,6 +52,8 @@ def evaluate(model_paths):
             test_dir = Path(scene_dir) / "test"
 
             for method in os.listdir(test_dir):
+                print("Method:", method)
+
                 full_dict[scene_dir][method] = {}
                 per_view_dict[scene_dir][method] = {}
                 full_dict_polytopeonly[scene_dir][method] = {}
@@ -67,7 +71,12 @@ def evaluate(model_paths):
                 for idx in tqdm(range(len(renders)), desc="Metric evaluation progress"):
                     ssims.append(ssim(renders[idx], gts[idx]))
                     psnrs.append(psnr(renders[idx], gts[idx]))
-                    lpipss.append(lpips(renders[idx], gts[idx], net_type='vgg'))     
+                    lpipss.append(lpips(renders[idx], gts[idx], net_type='vgg'))
+
+                print("  SSIM : {:>12.7f}".format(torch.tensor(ssims).mean(), ".5"))
+                print("  PSNR : {:>12.7f}".format(torch.tensor(psnrs).mean(), ".5"))
+                print("  LPIPS: {:>12.7f}".format(torch.tensor(lpipss).mean(), ".5"))
+                print("")
 
                 full_dict[scene_dir][method].update({"SSIM": torch.tensor(ssims).mean().item(),
                                                         "PSNR": torch.tensor(psnrs).mean().item(),
@@ -82,8 +91,6 @@ def evaluate(model_paths):
                 json.dump(per_view_dict[scene_dir], fp, indent=True)
         except:
             print("Unable to compute metrics for model", scene_dir)
-        
-    return full_dict, per_view_dict
 
 if __name__ == "__main__":
     device = torch.device("cuda:0")
