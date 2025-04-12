@@ -5,6 +5,9 @@
 #SBATCH --output=output/train_%A_%a.txt
 #SBATCH --time=0-25:40            # time (DD-HH:MM)
 
+# Equivalent salloc command for interactive allocation:
+# salloc --gpus=1 --cpus-per-task=6 --mem=24G --time=00:40:00
+
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 module load cuda cudnn gcc python/3.10 opencv/4.10.0
 
@@ -19,7 +22,7 @@ NUM_VIEWS=$(echo $CONFIG | cut -d',' -f2)
 ANGULAR_COVERAGE=$(echo $CONFIG | cut -d',' -f3)
 RANGE_TYPE=$(echo $CONFIG | cut -d',' -f4)
 # Name the experiment
-EXPERIMENT_NAME="${SAMPLING_TYPE}_${NUM_VIEWS}_${ANGULAR_COVERAGE}_${RANGE_TYPE}"
+EXPERIMENT_NAME="Sparse_${SAMPLING_TYPE}_${NUM_VIEWS}_${ANGULAR_COVERAGE}_${RANGE_TYPE}"
 # Create a directory for the experiment
 mkdir -p "experiments/$EXPERIMENT_NAME"
 

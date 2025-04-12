@@ -15,7 +15,7 @@ import json
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks, select_camera_subset
 from scene.gaussian_model import GaussianModel
-from arguments import ModelParams
+from arguments import ModelParams # Ensure ModelParams is imported
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
 
 class Scene:
@@ -23,18 +23,21 @@ class Scene:
     gaussians : GaussianModel
 
     def __init__(self, args : ModelParams, gaussians : GaussianModel, load_iteration=None, shuffle=True, resolution_scales=[1.0]):
-        """b
+        """
         :param path: Path to colmap scene main folder.
         """
         self.model_path = args.model_path
         self.loaded_iter = None
-        self.gaussians = gaussians         
+        self.gaussians = gaussians
 
-        # Add these parameters to ModelParams first
-        self.num_views = args.num_views  # N = {5,10,15,20,30,50}
-        self.sampling_type = args.sampling_type # 'random' or 'structured'
-        self.angular_coverage = args.angular_coverage # 60 or 180
-                
+        # These parameters are now part of args (ModelParams)
+        self.num_views = args.num_views
+        self.sampling_type = args.sampling_type
+        self.angular_coverage = args.angular_coverage
+        # Store active learning params if needed later, otherwise args has them.
+        # self.active_learning_strategy = args.active_learning_strategy
+        # self.active_learning_candidates = args.active_learning_candidates
+
         if load_iteration:
             if load_iteration == -1:
                 self.loaded_iter = searchForMaxIteration(os.path.join(self.model_path, "point_cloud"))

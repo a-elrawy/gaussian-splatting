@@ -61,6 +61,9 @@ class ModelParams(ParamGroup):
         self.sampling_type = "random"  
         self.angular_coverage = 60.0
         self.range_type = "full"
+        # Active learning parameters
+        self.active_learning_strategy = "random" # Default strategy
+        self.active_learning_candidates = 10 # Default number of candidates
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

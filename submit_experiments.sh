@@ -7,14 +7,6 @@ random,20,0,full
 random,30,0,full
 random,40,0,full
 random,50,0,full
-random,60,0,full
-random,70,0,full
-random,80,0,full
-random,90,0,full
-random,100,0,full
-random,120,0,full
-random,140,0,full
-random,160,0,full
 EOL
 
 # Count number of experiments (excluding comment lines)

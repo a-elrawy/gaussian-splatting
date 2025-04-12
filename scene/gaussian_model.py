@@ -46,6 +46,9 @@ class GaussianModel:
 
         self.rotation_activation = torch.nn.functional.normalize
 
+        self.uncertainty_activation = torch.sigmoid
+        self.inverse_uncertainty_activation = inverse_sigmoid
+
 
     def __init__(self, sh_degree, optimizer_type="default"):
         self.active_sh_degree = 0
@@ -57,12 +60,15 @@ class GaussianModel:
         self._scaling = torch.empty(0)
         self._rotation = torch.empty(0)
         self._opacity = torch.empty(0)
+        self._uncertainty = torch.empty(0)
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
         self.optimizer = None
         self.percent_dense = 0
         self.spatial_lr_scale = 0
+        self._visibility_counter = torch.empty(0, dtype=torch.long)
+        self._error_accumulator = torch.empty(0, dtype=torch.float32)
         self.setup_functions()
 
     def capture(self):
@@ -74,26 +80,61 @@ class GaussianModel:
             self._scaling,
             self._rotation,
             self._opacity,
+            self._uncertainty,
             self.max_radii2D,
             self.xyz_gradient_accum,
             self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
+            self._visibility_counter,
+            self._error_accumulator,
         )
     
     def restore(self, model_args, training_args):
-        (self.active_sh_degree, 
-        self._xyz, 
-        self._features_dc, 
-        self._features_rest,
-        self._scaling, 
-        self._rotation, 
-        self._opacity,
-        self.max_radii2D, 
-        xyz_gradient_accum, 
-        denom,
-        opt_dict, 
-        self.spatial_lr_scale) = model_args
+        num_args = len(model_args)
+        expected_num_args = 15
+
+        if num_args != expected_num_args:
+            print(f"Warning: Checkpoint has {num_args} elements, expected {expected_num_args}. Assuming older format.")
+            (self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
+            self._features_rest,
+            self._scaling,
+            self._rotation,
+            self._opacity,
+            self.max_radii2D,
+            xyz_gradient_accum,
+            denom,
+            opt_dict,
+            self.spatial_lr_scale) = model_args[:12]
+
+            initial_uncertainty = 0.9
+            num_points = self._xyz.shape[0]
+            self._uncertainty = nn.Parameter(self.inverse_uncertainty_activation(initial_uncertainty * torch.ones((num_points, 1), dtype=torch.float, device="cuda")).requires_grad_(True))
+            self._visibility_counter = torch.zeros((num_points), dtype=torch.long, device="cuda")
+            self._error_accumulator = torch.zeros((num_points), dtype=torch.float32, device="cuda")
+        else:
+            (self.active_sh_degree,
+            self._xyz,
+            self._features_dc,
+            self._features_rest,
+            self._scaling,
+            self._rotation,
+            self._opacity,
+            uncertainty,
+            self.max_radii2D,
+            xyz_gradient_accum,
+            denom,
+            opt_dict,
+            self.spatial_lr_scale,
+            visibility_counter,
+            error_accumulator) = model_args
+
+            self._uncertainty = uncertainty
+            self._visibility_counter = visibility_counter
+            self._error_accumulator = error_accumulator
+
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
         self.denom = denom
@@ -130,6 +171,12 @@ class GaussianModel:
         return self.opacity_activation(self._opacity)
     
     @property
+    def get_uncertainty(self):
+        if self._uncertainty is None or self._uncertainty.numel() == 0:
+            return torch.empty(0, device=self._xyz.device)
+        return self.uncertainty_activation(self._uncertainty)
+
+    @property
     def get_exposure(self):
         return self._exposure
 
@@ -162,6 +209,9 @@ class GaussianModel:
         rots[:, 0] = 1
 
         opacities = self.inverse_opacity_activation(0.1 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        uncertainties = self.inverse_uncertainty_activation(0.9 * torch.ones((fused_point_cloud.shape[0], 1), dtype=torch.float, device="cuda"))
+        visibility_counter = torch.zeros((fused_point_cloud.shape[0]), dtype=torch.long, device="cuda")
+        error_accumulator = torch.zeros((fused_point_cloud.shape[0]), dtype=torch.float32, device="cuda")
 
         self._xyz = nn.Parameter(fused_point_cloud.requires_grad_(True))
         self._features_dc = nn.Parameter(features[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
@@ -169,7 +219,10 @@ class GaussianModel:
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
+        self._uncertainty = nn.Parameter(uncertainties.requires_grad_(True))
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self._visibility_counter = visibility_counter
+        self._error_accumulator = error_accumulator
         self.exposure_mapping = {cam_info.image_name: idx for idx, cam_info in enumerate(cam_infos)}
         self.pretrained_exposures = None
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
@@ -186,7 +239,8 @@ class GaussianModel:
             {'params': [self._features_rest], 'lr': training_args.feature_lr / 20.0, "name": "f_rest"},
             {'params': [self._opacity], 'lr': training_args.opacity_lr, "name": "opacity"},
             {'params': [self._scaling], 'lr': training_args.scaling_lr, "name": "scaling"},
-            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"}
+            {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
+            {'params': [self._uncertainty], 'lr': 0.0, "name": "uncertainty"}
         ]
 
         if self.optimizer_type == "default":
@@ -195,7 +249,6 @@ class GaussianModel:
             try:
                 self.optimizer = SparseGaussianAdam(l, lr=0.0, eps=1e-15)
             except:
-                # A special version of the rasterizer is required to enable sparse adam
                 self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
 
         self.exposure_optimizer = torch.optim.Adam([self._exposure])
@@ -311,6 +364,13 @@ class GaussianModel:
         self._scaling = nn.Parameter(torch.tensor(scales, dtype=torch.float, device="cuda").requires_grad_(True))
         self._rotation = nn.Parameter(torch.tensor(rots, dtype=torch.float, device="cuda").requires_grad_(True))
 
+        initial_uncertainty = 0.9
+        num_points = self._xyz.shape[0]
+        uncertainties = self.inverse_uncertainty_activation(initial_uncertainty * torch.ones((num_points, 1), dtype=torch.float, device="cuda"))
+        self._uncertainty = nn.Parameter(uncertainties.requires_grad_(True))
+        self._visibility_counter = torch.zeros((num_points), dtype=torch.long, device="cuda")
+        self._error_accumulator = torch.zeros((num_points), dtype=torch.float32, device="cuda")
+
         self.active_sh_degree = self.max_sh_degree
 
     def replace_tensor_to_optimizer(self, tensor, name):
@@ -356,12 +416,15 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        self._uncertainty = optimizable_tensors["uncertainty"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
         self.tmp_radii = self.tmp_radii[valid_points_mask]
+        self._visibility_counter = self._visibility_counter[valid_points_mask]
+        self._error_accumulator = self._error_accumulator[valid_points_mask]
 
     def cat_tensors_to_optimizer(self, tensors_dict):
         optimizable_tensors = {}
@@ -385,13 +448,14 @@ class GaussianModel:
 
         return optimizable_tensors
 
-    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii):
+    def densification_postfix(self, new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_uncertainty, new_visibility_counter, new_error_accumulator, new_tmp_radii):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
         "f_rest": new_features_rest,
         "opacity": new_opacities,
         "scaling" : new_scaling,
-        "rotation" : new_rotation}
+        "rotation" : new_rotation,
+        "uncertainty": new_uncertainty}
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
         self._xyz = optimizable_tensors["xyz"]
@@ -400,11 +464,14 @@ class GaussianModel:
         self._opacity = optimizable_tensors["opacity"]
         self._scaling = optimizable_tensors["scaling"]
         self._rotation = optimizable_tensors["rotation"]
+        self._uncertainty = optimizable_tensors["uncertainty"]
 
         self.tmp_radii = torch.cat((self.tmp_radii, new_tmp_radii))
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
+        self._visibility_counter = torch.cat((self._visibility_counter, new_visibility_counter), dim=0)
+        self._error_accumulator = torch.cat((self._error_accumulator, new_error_accumulator), dim=0)
 
     def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
         n_init_points = self.get_xyz.shape[0]
@@ -425,9 +492,12 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
+        new_uncertainty = self._uncertainty[selected_pts_mask].repeat(N,1)
+        new_visibility_counter = torch.zeros(selected_pts_mask.sum() * N, dtype=torch.long, device="cuda")
+        new_error_accumulator = torch.zeros(selected_pts_mask.sum() * N, dtype=torch.float32, device="cuda")
         new_tmp_radii = self.tmp_radii[selected_pts_mask].repeat(N)
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation, new_uncertainty, new_visibility_counter, new_error_accumulator, new_tmp_radii)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -444,30 +514,202 @@ class GaussianModel:
         new_opacities = self._opacity[selected_pts_mask]
         new_scaling = self._scaling[selected_pts_mask]
         new_rotation = self._rotation[selected_pts_mask]
+        new_uncertainty = self._uncertainty[selected_pts_mask]
+        new_visibility_counter = self._visibility_counter[selected_pts_mask]
+        new_error_accumulator = self._error_accumulator[selected_pts_mask]
 
         new_tmp_radii = self.tmp_radii[selected_pts_mask]
 
-        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_tmp_radii)
+        self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation, new_uncertainty, new_visibility_counter, new_error_accumulator, new_tmp_radii)
 
     def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size, radii):
-        grads = self.xyz_gradient_accum / self.denom
-        grads[grads.isnan()] = 0.0
+        # --- Check if accumulators are valid before using them ---
+        num_points_before = self.get_xyz.shape[0]
+        current_device = self._xyz.device
+        if self.xyz_gradient_accum is None or self.xyz_gradient_accum.shape[0] != num_points_before:
+            print(f"Warning: xyz_gradient_accum shape mismatch ({self.xyz_gradient_accum.shape[0] if self.xyz_gradient_accum is not None else 'None'} vs {num_points_before}) before densify_and_prune. Resetting.")
+            self.xyz_gradient_accum = torch.zeros((num_points_before, 1), device=current_device)
+        if self.denom is None or self.denom.shape[0] != num_points_before:
+            print(f"Warning: denom shape mismatch ({self.denom.shape[0] if self.denom is not None else 'None'} vs {num_points_before}) before densify_and_prune. Resetting.")
+            self.denom = torch.zeros((num_points_before, 1), device=current_device)
+        # --- End Check ---
 
-        self.tmp_radii = radii
+        grads = self.xyz_gradient_accum / (self.denom + 1e-7) # Add epsilon for safety
+        grads[grads.isnan()] = 0.0
+        grads[grads.isinf()] = 0.0 # Handle potential inf
+
+        # --- Check radii shape before assigning to tmp_radii ---
+        if radii is None or radii.shape[0] != num_points_before:
+             print(f"Warning: Radii shape mismatch ({radii.shape[0] if radii is not None else 'None'} vs {num_points_before}) in densify_and_prune. Using zeros for tmp_radii.")
+             self.tmp_radii = torch.zeros(num_points_before, device=current_device)
+        else:
+             # Ensure radii is on the correct device before assigning
+             self.tmp_radii = radii.to(current_device)
+        # --- End Check ---
+
+
         self.densify_and_clone(grads, max_grad, extent)
         self.densify_and_split(grads, max_grad, extent)
 
-        prune_mask = (self.get_opacity < min_opacity).squeeze()
-        if max_screen_size:
-            big_points_vs = self.max_radii2D > max_screen_size
-            big_points_ws = self.get_scaling.max(dim=1).values > 0.1 * extent
-            prune_mask = torch.logical_or(torch.logical_or(prune_mask, big_points_vs), big_points_ws)
-        self.prune_points(prune_mask)
-        tmp_radii = self.tmp_radii
+        # --- Pruning Logic ---
+        num_points_after_densify = self.get_xyz.shape[0] # Get current number of points
+        current_device = self._xyz.device # Re-check device
+
+        # Ensure opacity exists and has correct shape
+        if self._opacity is None or self._opacity.numel() == 0 or self._opacity.shape[0] != num_points_after_densify:
+             print("Warning: Opacity tensor invalid during pruning. Skipping opacity prune.")
+             prune_mask_opacity = torch.zeros(num_points_after_densify, dtype=torch.bool, device=current_device)
+        else:
+             # Ensure opacity is on correct device and squeeze potential extra dim
+             prune_mask_opacity = (self.get_opacity.to(current_device).squeeze() < min_opacity)
+
+
+        prune_mask = prune_mask_opacity
+
+        # Screen size pruning
+        if max_screen_size is not None and max_screen_size > 0:
+             # Ensure max_radii2D exists and has correct shape
+             if self.max_radii2D is None or self.max_radii2D.numel() == 0 or self.max_radii2D.shape[0] != num_points_after_densify:
+                  print("Warning: max_radii2D tensor invalid during pruning. Skipping screen size prune.")
+                  # Don't modify prune_mask if data is invalid
+             else:
+                  big_points_vs = self.max_radii2D.to(current_device) > max_screen_size
+                  prune_mask = torch.logical_or(prune_mask, big_points_vs)
+
+        # World size pruning (extent based)
+        # Ensure scaling exists and has correct shape
+        if self._scaling is None or self._scaling.numel() == 0 or self._scaling.shape[0] != num_points_after_densify:
+             print("Warning: Scaling tensor invalid during pruning. Skipping world size prune.")
+             # Don't modify prune_mask if data is invalid
+        else:
+             big_points_ws = self.get_scaling.to(current_device).max(dim=1).values > 0.1 * extent
+             prune_mask = torch.logical_or(prune_mask, big_points_ws)
+
+
+        if prune_mask.any():
+             self.prune_points(prune_mask)
+        # --- End Pruning ---
+
+
+        # Reset gradient accumulators for the next densification cycle
+        # Reset based on the *final* number of points after pruning
+        num_points_final = self.get_xyz.shape[0]
+        self.xyz_gradient_accum = torch.zeros((num_points_final, 1), device=current_device)
+        self.denom = torch.zeros((num_points_final, 1), device=current_device)
+        # Reset max_radii2D for the next cycle
+        self.max_radii2D = torch.zeros((num_points_final), device=current_device)
+
+        # Clear temporary radii storage
         self.tmp_radii = None
 
         torch.cuda.empty_cache()
 
     def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
-        self.denom[update_filter] += 1
+        # Ensure accumulators have the correct shape and device
+        num_points = self.get_xyz.shape[0]
+        current_device = self._xyz.device
+
+        # Check accumulators - these should match num_points *after* potential previous densification
+        if self.xyz_gradient_accum is None or self.xyz_gradient_accum.shape[0] != num_points:
+             # Don't just warn, actually skip the update if accumulators are invalid
+             print(f"Error: xyz_gradient_accum shape mismatch ({self.xyz_gradient_accum.shape[0] if self.xyz_gradient_accum is not None else 'None'} vs {num_points}) in add_densification_stats. Skipping update.")
+             # Optionally reinitialize here if that's the desired recovery behavior
+             # self.xyz_gradient_accum = torch.zeros((num_points, 1), device=current_device)
+             return
+        # else: # No need to move if already checked
+             # self.xyz_gradient_accum = self.xyz_gradient_accum.to(current_device)
+
+        if self.denom is None or self.denom.shape[0] != num_points:
+             print(f"Error: denom shape mismatch ({self.denom.shape[0] if self.denom is not None else 'None'} vs {num_points}) in add_densification_stats. Skipping update.")
+             # Optionally reinitialize here
+             # self.denom = torch.zeros((num_points, 1), device=current_device)
+             return
+        # else: # No need to move if already checked
+             # self.denom = self.denom.to(current_device)
+
+        # Check update_filter - this comes from the *current* render
+        if update_filter is None:
+             # print(f"Warning: update_filter is None in add_densification_stats. Skipping update.") # Reduce verbosity
+             return
+
+        # Check grad tensor - this also comes from the *current* render
+        if viewspace_point_tensor is None or viewspace_point_tensor.grad is None:
+             # print(f"Warning: Gradient tensor invalid in add_densification_stats. Skipping update.") # Reduce verbosity
+             return
+        grad_tensor = viewspace_point_tensor.grad
+
+        # *** Crucial Check: Ensure filter and grad match the current point count ***
+        if update_filter.shape[0] != num_points or grad_tensor.shape[0] != num_points:
+            print(f"Error: Shape mismatch detected in add_densification_stats. "
+                  f"Filter: {update_filter.shape[0]}, Grad: {grad_tensor.shape[0]}, Expected: {num_points}. Skipping update.")
+            return
+
+        # Ensure filter is boolean, 1D, and on correct device
+        update_filter = update_filter.bool().squeeze().to(current_device)
+        grad_tensor = grad_tensor.to(current_device) # Ensure grad tensor is on correct device
+
+        # Check shape again after squeeze, ensure it's 1D
+        if update_filter.ndim != 1:
+            print(f"Error: update_filter is not 1D after squeeze (ndim={update_filter.ndim}) in add_densification_stats. Skipping update.")
+            return
+
+        # Proceed with update only if filter is valid and has True values
+        if update_filter.any():
+             # Calculate norm only for relevant points
+             # Use grad_tensor which is already checked and on the correct device
+             # Ensure grad_tensor indexing works with 1D boolean mask
+             grads_to_update = grad_tensor[update_filter, :2] # Selects [N_true, 2]
+             norm_grads = torch.norm(grads_to_update, dim=-1, keepdim=True) # Result is [N_true, 1]
+
+             # Update accumulators using the 1D boolean filter
+             # Ensure shapes on both sides of += match. norm_grads is [N_true, 1].
+             # self.xyz_gradient_accum[update_filter] selects [N_true, 1] elements.
+             self.xyz_gradient_accum[update_filter] += norm_grads
+             self.denom[update_filter] += 1
+
+    @torch.no_grad()
+    def update_uncertainty(self, lambda_err, gamma_view, min_views_for_update=1, iteration=0):
+        if self._uncertainty is None or self._visibility_counter is None:
+            print("Warning: Uncertainty or visibility counter not initialized. Cannot update uncertainty.")
+            return
+
+        num_gaussians = self._xyz.shape[0]
+        if num_gaussians == 0:
+            return
+
+        current_device = self._xyz.device
+
+        if self._uncertainty.shape[0] != num_gaussians:
+            print(f"Warning: Uncertainty shape mismatch ({self._uncertainty.shape[0]} vs {num_gaussians}) in update_uncertainty. Reinitializing.")
+            initial_uncertainty = 0.9
+            uncertainties = self.inverse_uncertainty_activation(initial_uncertainty * torch.ones((num_gaussians, 1), dtype=torch.float, device=current_device))
+            self._uncertainty = nn.Parameter(uncertainties.requires_grad_(True))
+
+        if self._visibility_counter.shape[0] != num_gaussians:
+            print(f"Warning: Visibility counter shape mismatch ({self._visibility_counter.shape[0]} vs {num_gaussians}) in update_uncertainty. Reinitializing.")
+            self._visibility_counter = torch.zeros((num_gaussians), dtype=torch.long, device=current_device)
+        else:
+            self._visibility_counter = self._visibility_counter.to(current_device)
+
+        if self._error_accumulator is None or self._error_accumulator.shape[0] != num_gaussians:
+            self._error_accumulator = torch.zeros((num_gaussians), dtype=torch.float32, device=current_device)
+        else:
+            self._error_accumulator = self._error_accumulator.to(current_device)
+
+        update_mask = self._visibility_counter >= min_views_for_update
+
+        if update_mask.sum() == 0:
+            return
+
+        vis_counts_float = self._visibility_counter[update_mask].float()
+        view_term = gamma_view / torch.clamp(vis_counts_float, min=1e-6)
+
+        clamped_uncertainty = torch.clamp(view_term, 0.01, 0.99)
+
+        uncertainty_update_tensor = self.inverse_uncertainty_activation(clamped_uncertainty).unsqueeze(-1)
+
+        if isinstance(self._uncertainty, nn.Parameter):
+            self._uncertainty.data[update_mask] = uncertainty_update_tensor
+        else:
+            print("Warning: _uncertainty is not an nn.Parameter during update. Updating tensor directly.")
+            self._uncertainty[update_mask] = uncertainty_update_tensor

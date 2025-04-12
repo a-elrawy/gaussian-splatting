@@ -131,3 +131,42 @@ def safe_state(silent):
     np.random.seed(0)
     torch.manual_seed(0)
     torch.cuda.set_device(torch.device("cuda:0"))
+
+def score_camera_uncertainty(uncertainty_map: torch.Tensor, method: str = "mean") -> float:
+    """
+    Calculates a scalar score from a rendered uncertainty map.
+
+    Args:
+        uncertainty_map: A 2D tensor representing the uncertainty per pixel.
+                         Expected shape [H, W] or [1, H, W].
+        method: The scoring method ("mean", "max", "sum").
+
+    Returns:
+        A scalar float representing the uncertainty score for the view.
+        Returns 0.0 if the map is invalid or empty.
+    """
+    if uncertainty_map is None or uncertainty_map.numel() == 0:
+        print("Warning: Invalid or empty uncertainty map provided to score_camera_uncertainty.")
+        return 0.0
+
+    # Ensure map is float and on CPU for numpy conversion if needed, or keep on device
+    uncertainty_map = uncertainty_map.float() # Ensure float type
+
+    if method == "mean":
+        score = torch.mean(uncertainty_map).item()
+    elif method == "max":
+        score = torch.max(uncertainty_map).item()
+    elif method == "sum":
+        score = torch.sum(uncertainty_map).item()
+    # Add other methods like median, percentile etc. if needed
+    # elif method == "median":
+    #     score = torch.median(uncertainty_map.flatten()).values.item()
+    else:
+        raise ValueError(f"Unknown uncertainty scoring method: {method}")
+
+    # Handle potential NaN/Inf scores
+    if np.isnan(score) or np.isinf(score):
+        print(f"Warning: Calculated uncertainty score is NaN or Inf ({score}). Returning 0.0.")
+        return 0.0
+
+    return score
