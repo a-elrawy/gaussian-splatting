@@ -40,6 +40,24 @@ try:
 except:
     SPARSE_ADAM_AVAILABLE = False
 
+def compute_planarity_loss(gaussians, plane_hypotheses):
+    # Compute soft constraint loss for Gaussians to lie near detected planes
+    loss = 0.0
+    for plane in plane_hypotheses:
+        normal = plane["normal"]
+        point_on_plane = plane["point"]
+        distances = torch.abs(torch.sum((gaussians.get_xyz - point_on_plane) * normal, dim=1))
+        loss += distances.mean()
+    return loss
+
+def compute_symmetry_loss(gaussians, symmetry_plane):
+    # Compute loss for symmetry by tying Gaussian parameters across the symmetry plane
+    normal = symmetry_plane["normal"]
+    point_on_plane = symmetry_plane["point"]
+    reflected_points = gaussians.get_xyz - 2 * torch.sum((gaussians.get_xyz - point_on_plane) * normal, dim=1, keepdim=True) * normal
+    distances = torch.norm(gaussians.get_xyz - reflected_points, dim=1)
+    return distances.mean()
+
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
 
     if not SPARSE_ADAM_AVAILABLE and opt.optimizer_type == "sparse_adam":
@@ -67,6 +85,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     viewpoint_indices = list(range(len(viewpoint_stack)))
     ema_loss_for_log = 0.0
     ema_Ll1depth_for_log = 0.0
+
+    # Define normalization factors for structural losses
+    planarity_loss_scale = 1.0 / 1000.0  # Adjust based on dataset statistics
+    symmetry_loss_scale = 1.0 / 10.0    # Adjust based on dataset statistics
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -123,7 +145,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             ssim_value = ssim(image, gt_image)
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        photometric_loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
 
         # Depth regularization
         Ll1depth_pure = 0.0
@@ -134,28 +156,48 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             Ll1depth_pure = torch.abs((invDepth  - mono_invdepth) * depth_mask).mean()
             Ll1depth = depth_l1_weight(iteration) * Ll1depth_pure 
-            loss += Ll1depth
+            photometric_loss += Ll1depth
             Ll1depth = Ll1depth.item()
         else:
             Ll1depth = 0
 
-        loss.backward()
+        # Structural losses
+        detected_planes = gaussians.detect_planes(gaussians.get_xyz)  # Detect planes
+        symmetry_plane = gaussians.detect_symmetry(gaussians.get_xyz)  # Detect symmetry
+
+        planarity_loss = compute_planarity_loss(gaussians, detected_planes) if detected_planes else 0.0
+        symmetry_loss = compute_symmetry_loss(gaussians, symmetry_plane) if symmetry_plane else 0.0
+
+        # Scale structural losses
+        scaled_planarity_loss = planarity_loss * planarity_loss_scale
+        scaled_symmetry_loss = symmetry_loss * symmetry_loss_scale
+
+        # Combine losses
+        total_loss = photometric_loss + opt.lambda_p * scaled_planarity_loss + opt.lambda_s * scaled_symmetry_loss
+
+        total_loss.backward()
 
         iter_end.record()
 
         with torch.no_grad():
             # Progress bar
-            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            ema_loss_for_log = 0.4 * total_loss.item() + 0.6 * ema_loss_for_log
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
 
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})
+                progress_bar.set_postfix({
+                    "Loss": f"{ema_loss_for_log:.{7}f}",
+                    "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}",
+                    "Photometric Loss": f"{photometric_loss:.{7}f}",
+                    "Planarity Loss": f"{scaled_planarity_loss:.{7}f}",
+                    "Symmetry Loss": f"{scaled_symmetry_loss:.{7}f}"
+                })
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp)
+            training_report(tb_writer, iteration, Ll1, total_loss, photometric_loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background, 1., SPARSE_ADAM_AVAILABLE, None, dataset.train_test_exp), dataset.train_test_exp, scaled_planarity_loss, scaled_symmetry_loss)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -211,10 +253,15 @@ def prepare_output_and_logger(args):
         print("Tensorboard not available: not logging progress")
     return tb_writer
 
-def training_report(tb_writer, iteration, Ll1, loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, train_test_exp):
+def training_report(tb_writer, iteration, Ll1, loss, photometric_loss, l1_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, train_test_exp, planarity_loss=None, symmetry_loss=None):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/l1_loss', Ll1.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
+        tb_writer.add_scalar('train_loss_patches/photometric_loss', photometric_loss.item(), iteration)
+        if planarity_loss is not None:
+            tb_writer.add_scalar('train_loss_patches/planarity_loss', planarity_loss, iteration)
+        if symmetry_loss is not None:
+            tb_writer.add_scalar('train_loss_patches/symmetry_loss', symmetry_loss, iteration)
         tb_writer.add_scalar('iter_time', elapsed, iteration)
 
     # Report test and samples of training set

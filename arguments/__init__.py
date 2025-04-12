@@ -102,6 +102,9 @@ class OptimizationParams(ParamGroup):
         self.depth_l1_weight_final = 0.01
         self.random_background = False
         self.optimizer_type = "default"
+        self.lambda_p = 0.1  # Weight for planarity loss
+        self.lambda_s = 0.1  # Weight for symmetry loss
+        self.lambda_r = 0.01  # Weight for regularization loss
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):

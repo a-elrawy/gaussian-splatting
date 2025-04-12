@@ -21,6 +21,8 @@ from utils.sh_utils import RGB2SH
 from simple_knn._C import distCUDA2
 from utils.graphics_utils import BasicPointCloud
 from utils.general_utils import strip_symmetric, build_scaling_rotation
+from sklearn.decomposition import PCA  # Add this import
+from sklearn.cluster import DBSCAN
 
 try:
     from diff_gaussian_rasterization import SparseGaussianAdam
@@ -146,7 +148,62 @@ class GaussianModel:
         if self.active_sh_degree < self.max_sh_degree:
             self.active_sh_degree += 1
 
-    def create_from_pcd(self, pcd : BasicPointCloud, cam_infos : int, spatial_lr_scale : float):
+    def detect_planes(self, point_cloud):
+        # Detach the tensor and convert it to a NumPy array
+        point_cloud_np = point_cloud.detach().cpu().numpy()
+        
+        # Detect planes using DBSCAN
+        dbscan = DBSCAN(eps=0.1, min_samples=10).fit(point_cloud_np)
+        labels = dbscan.labels_
+        unique_labels = set(labels)
+        plane_hypotheses = []
+
+        for label in unique_labels:
+            if label == -1:  # Ignore noise points
+                continue
+            cluster_points = point_cloud_np[labels == label]
+            if cluster_points.shape[0] < 3:  # Skip clusters with fewer than 3 points
+                continue
+            pca = PCA(n_components=3)
+            pca.fit(cluster_points)
+            normal = pca.components_[-1]
+            point_on_plane = cluster_points.mean(axis=0)
+            plane_hypotheses.append({
+                "normal": torch.tensor(normal, device="cuda"),
+                "point": torch.tensor(point_on_plane, device="cuda")
+            })
+        return plane_hypotheses
+
+    def detect_symmetry(self, point_cloud):
+        # Ensure point_cloud is a NumPy array
+        point_cloud_np = point_cloud.detach().cpu().numpy()
+        
+        # Detect symmetry plane using PCA
+        pca = PCA(n_components=3)
+        pca.fit(point_cloud_np)
+        normal = pca.components_[-1]
+        point_on_plane = point_cloud_np.mean(axis=0)
+        return {"normal": torch.tensor(normal, device="cuda"), "point": torch.tensor(point_on_plane, device="cuda")}
+
+    def densify_with_planes(self, point_cloud, plane_hypotheses):
+        # Populate Gaussian primitives along detected planes
+        densified_points = []
+        for plane in plane_hypotheses:
+            normal = plane["normal"]
+            point_on_plane = plane["point"]
+            offsets = torch.linspace(-0.5, 0.5, steps=10, device="cuda").unsqueeze(1) * normal
+            new_points = point_on_plane + offsets
+            densified_points.append(new_points)
+        return torch.cat(densified_points, dim=0)
+
+    def apply_symmetry(self, point_cloud, symmetry_plane):
+        # Mirror points across the symmetry plane
+        normal = symmetry_plane["normal"]
+        point_on_plane = symmetry_plane["point"]
+        mirrored_points = point_cloud - 2 * torch.sum((point_cloud - point_on_plane) * normal, dim=1, keepdim=True) * normal
+        return mirrored_points
+
+    def create_from_pcd(self, pcd: BasicPointCloud, cam_infos: int, spatial_lr_scale: float):
         self.spatial_lr_scale = spatial_lr_scale
         fused_point_cloud = torch.tensor(np.asarray(pcd.points)).float().cuda()
         fused_color = RGB2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
@@ -174,6 +231,20 @@ class GaussianModel:
         self.pretrained_exposures = None
         exposure = torch.eye(3, 4, device="cuda")[None].repeat(len(cam_infos), 1, 1)
         self._exposure = nn.Parameter(exposure.requires_grad_(True))
+
+        # Convert pcd.points to a PyTorch tensor
+        pcd_points_tensor = torch.tensor(pcd.points, dtype=torch.float32, device="cuda")
+        
+        # Detect planes and symmetry
+        plane_hypotheses = self.detect_planes(pcd_points_tensor)
+        symmetry_plane = self.detect_symmetry(pcd_points_tensor)
+
+        # Densify and apply symmetry
+        densified_points = self.densify_with_planes(pcd_points_tensor, plane_hypotheses)
+        mirrored_points = self.apply_symmetry(densified_points, symmetry_plane)
+
+        # Combine original and new points
+        combined_points = torch.cat([pcd_points_tensor, densified_points, mirrored_points], dim=0)
 
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
