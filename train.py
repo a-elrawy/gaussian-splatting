@@ -12,7 +12,7 @@
 import os
 import torch
 from random import randint
-from utils.loss_utils import l1_loss, ssim
+from utils.loss_utils import l1_loss, ssim, confidence_weighted_photometric_loss, opacity_penalty, depth_deviation_penalty
 from gaussian_renderer import render, network_gui
 import sys
 from scene import Scene, GaussianModel
@@ -117,13 +117,24 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
-        Ll1 = l1_loss(image, gt_image)
+        Ll1 = l1_loss(image, gt_image)  # L1 loss
         if FUSED_SSIM_AVAILABLE:
             ssim_value = fused_ssim(image.unsqueeze(0), gt_image.unsqueeze(0))
         else:
             ssim_value = ssim(image, gt_image)
 
-        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim_value)
+        photometric_loss = confidence_weighted_photometric_loss(image, gt_image, gaussians.get_confidence)
+        if "depth" in render_pkg:
+            depth_loss = depth_deviation_penalty(render_pkg["depth"], viewpoint_cam.invdepthmap, gaussians.get_confidence)
+            loss = photometric_loss + opt.lambda_depth * depth_loss
+        else:
+            print(f"Warning: Depth data missing in render_pkg at iteration {iteration}. Skipping depth loss.")
+            depth_loss = 0.0
+            loss = photometric_loss
+        opacity_loss = opacity_penalty(gaussians.get_opacity, gaussians.get_confidence)
+
+        # Add Ll1 and opacity loss to the total loss
+        loss += opt.lambda_opacity * opacity_loss
 
         # Depth regularization
         Ll1depth_pure = 0.0
@@ -139,6 +150,15 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         else:
             Ll1depth = 0
 
+        # Log all losses
+        if tb_writer:
+            tb_writer.add_scalar('loss/photometric_loss', photometric_loss.item(), iteration)
+            tb_writer.add_scalar('loss/depth_loss', depth_loss if isinstance(depth_loss, float) else depth_loss.item(), iteration)
+            tb_writer.add_scalar('loss/opacity_loss', opacity_loss.item(), iteration)
+            tb_writer.add_scalar('loss/Ll1', Ll1.item(), iteration)  # Log Ll1
+            tb_writer.add_scalar('loss/Ll1depth', Ll1depth, iteration)
+            tb_writer.add_scalar('loss/total_loss', loss.item(), iteration)
+
         loss.backward()
 
         iter_end.record()
@@ -149,7 +169,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             ema_Ll1depth_for_log = 0.4 * Ll1depth + 0.6 * ema_Ll1depth_for_log
 
             if iteration % 10 == 0:
-                progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}", "Depth Loss": f"{ema_Ll1depth_for_log:.{7}f}"})
+                progress_bar.set_postfix({
+                    "Total Loss": f"{ema_loss_for_log:.7f}",
+                    "Photometric Loss": f"{photometric_loss.item():.7f}",
+                    "Depth Loss": f"{depth_loss if isinstance(depth_loss, float) else depth_loss.item():.7f}",
+                    "Opacity Loss": f"{opacity_loss.item():.7f}",
+                    "L1 Loss": f"{Ll1.item():.7f}",  # Add Ll1 to progress bar
+                    "Depth Reg Loss": f"{ema_Ll1depth_for_log:.7f}"
+                })
                 progress_bar.update(10)
             if iteration == opt.iterations:
                 progress_bar.close()

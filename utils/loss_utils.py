@@ -43,6 +43,34 @@ def l1_loss(network_output, gt):
 def l2_loss(network_output, gt):
     return ((network_output - gt) ** 2).mean()
 
+def confidence_weighted_photometric_loss(rendered, gt, confidence):
+    # Ensure confidence has the correct dimensions (N, C, H, W)
+    if confidence.dim() == 2:  # If confidence is (H, W), add batch and channel dimensions
+        confidence = confidence.unsqueeze(0).unsqueeze(0)
+    elif confidence.dim() == 3:  # If confidence is (C, H, W), add batch dimension
+        confidence = confidence.unsqueeze(0)
+
+    # Ensure confidence matches the spatial dimensions of rendered and gt
+    if confidence.shape[-2:] != rendered.shape[-2:]:
+        confidence = F.interpolate(confidence, size=rendered.shape[-2:], mode='bilinear', align_corners=False)
+    
+    confidence = torch.clamp(confidence, 0, 1)
+    return (confidence * ((rendered - gt) ** 2)).mean()
+
+def depth_deviation_penalty(gaussian_depth, triangulated_depth, confidence):
+    # Check if triangulated_depth is None
+    if triangulated_depth is None:
+        print("Warning: triangulated_depth is None. Skipping depth deviation penalty.")
+        return torch.tensor(0.0, device=gaussian_depth.device)
+
+    return (confidence * torch.abs(gaussian_depth - triangulated_depth)).mean()
+
+def opacity_penalty(opacity, confidence):
+    # Clamp values to ensure they are within valid ranges
+    confidence = torch.clamp(confidence, 0, 1)
+    opacity = torch.clamp(opacity, 0)
+    return (((1 - confidence)) * (opacity ** 2)).mean()
+
 def gaussian(window_size, sigma):
     gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
     return gauss / gauss.sum()

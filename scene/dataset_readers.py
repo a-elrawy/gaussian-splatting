@@ -376,6 +376,65 @@ def select_camera_subset(cameras, num_views, sampling_type='random', angular_cov
     else:
         raise ValueError(f"Unknown sampling type: {sampling_type}")
 
+def compute_sgc_scores(cameras, points3d):
+    """
+    Compute Sparse Geometric Consistency (SGC) scores for 3D points.
+    """
+    sgc_scores = {}
+
+    # Check if points3d is a numpy array
+    if isinstance(points3d, np.ndarray):
+        for point_id, point in enumerate(points3d):
+            # Ensure point is valid
+            if point is None or len(point) != 3:
+                print(f"Warning: Point {point_id} is invalid. Skipping.")
+                continue
+
+            # Initialize variables
+            reprojection_errors = []
+            view_support = 0
+
+            for cam in cameras:
+                # Project the 3D point into the camera's image plane
+                point_cam_space = np.dot(cam.R, point) + cam.T
+                if point_cam_space[2] <= 0:
+                    continue  # Skip points behind the camera
+
+                # Compute normalized image coordinates
+                x_proj = point_cam_space[0] / point_cam_space[2]
+                y_proj = point_cam_space[1] / point_cam_space[2]
+
+                # Convert to pixel coordinates
+                fx = cam.width / (2 * np.tan(cam.FovX / 2))
+                fy = cam.height / (2 * np.tan(cam.FovY / 2))
+                cx, cy = cam.width / 2, cam.height / 2
+                u = fx * x_proj + cx
+                v = fy * y_proj + cy
+
+                # Check if the projection is within the image bounds
+                if 0 <= u < cam.width and 0 <= v < cam.height:
+                    view_support += 1
+
+                    # Compute reprojection error (if observed points are available)
+                    observed_point = None  # Placeholder for observed points
+                    if hasattr(cam, "xys") and hasattr(cam, "point3D_ids"):
+                        observed_point = cam.xys[point_id] if point_id in cam.point3D_ids else None
+                    if observed_point is not None:
+                        reprojection_error = np.linalg.norm(np.array([u, v]) - observed_point)
+                        reprojection_errors.append(reprojection_error)
+
+            # Aggregate SGC score components
+            avg_reprojection_error = np.mean(reprojection_errors) if reprojection_errors else float('inf')
+
+            # Compute final SGC score (example formula)
+            sgc_score = view_support / (1 + avg_reprojection_error)
+            sgc_scores[point_id] = {"score": sgc_score}
+    else:
+        print("Error: points3d must be a numpy.ndarray.")
+        return sgc_scores
+
+    return sgc_scores
+
 sceneLoadTypeCallbacks = {
     "Colmap": readColmapSceneInfo,
     "Blender" : readNerfSyntheticInfo

@@ -12,8 +12,9 @@
 import os
 import random
 import json
+import numpy as np  # Add this import at the top of the file
 from utils.system_utils import searchForMaxIteration
-from scene.dataset_readers import sceneLoadTypeCallbacks, select_camera_subset
+from scene.dataset_readers import sceneLoadTypeCallbacks, select_camera_subset, compute_sgc_scores
 from scene.gaussian_model import GaussianModel
 from arguments import ModelParams
 from utils.camera_utils import cameraList_from_camInfos, camera_to_JSON
@@ -64,6 +65,27 @@ class Scene:
 
             scene_info = scene_info._replace(train_cameras=selected_cameras)
 
+        print("Debug: Inspecting scene_info.train_cameras")
+        for cam in scene_info.train_cameras[:5]:  # Print details for the first 5 cameras
+            print(f"Camera attributes: {dir(cam)}")
+            print(f"Camera R shape: {cam.R.shape}, T shape: {cam.T.shape}")
+            print(f"Camera width: {cam.width}, height: {cam.height}")
+            print(f"Camera image_name: {cam.image_name}")
+            if hasattr(cam, "xys"):
+                print(f"Camera xys shape: {cam.xys.shape}")
+            if hasattr(cam, "point3D_ids"):
+                print(f"Camera point3D_ids shape: {cam.point3D_ids.shape}")
+
+        print("Debug: Inspecting scene_info.point_cloud.points")
+        if isinstance(scene_info.point_cloud.points, np.ndarray):
+            print(f"scene_info.point_cloud.points is a numpy array with shape: {scene_info.point_cloud.points.shape}")
+        elif isinstance(scene_info.point_cloud.points, dict):
+            print(f"scene_info.point_cloud.points is a dictionary with keys: {list(scene_info.point_cloud.points.keys())[:5]} (showing first 5 keys)")
+            for key, point in list(scene_info.point_cloud.points.items())[:5]:
+                print(f"Point {key}: {point}")
+                if hasattr(point, "xyz"):
+                    print(f"Point xyz: {point.xyz}")
+
         if not self.loaded_iter:
             with open(scene_info.ply_path, 'rb') as src_file, open(os.path.join(self.model_path, "input.ply") , 'wb') as dest_file:
                 dest_file.write(src_file.read())
@@ -83,6 +105,12 @@ class Scene:
             random.shuffle(scene_info.test_cameras)  # Multi-res consistent random shuffling
 
         self.cameras_extent = scene_info.nerf_normalization["radius"]
+
+        if scene_info.point_cloud and hasattr(scene_info.point_cloud, "points"):
+            sgc_scores = compute_sgc_scores(scene_info.train_cameras, scene_info.point_cloud.points)
+            gaussians.associate_confidence(sgc_scores, radii=None)
+        else:
+            print("Warning: Point cloud data is missing or invalid. Skipping SGC score computation.")
 
         for resolution_scale in resolution_scales:
             print("Loading Training Cameras")

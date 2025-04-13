@@ -102,6 +102,9 @@ class OptimizationParams(ParamGroup):
         self.depth_l1_weight_final = 0.01
         self.random_background = False
         self.optimizer_type = "default"
+        self.confidence_lr = 0.001  # Learning rate for confidence scores
+        self.lambda_depth = 0.1  # Weight for depth deviation penalty
+        self.lambda_opacity = 0.05  # Weight for opacity penalty
         super().__init__(parser, "Optimization Parameters")
 
 def get_combined_args(parser : ArgumentParser):
